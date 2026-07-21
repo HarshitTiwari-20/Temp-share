@@ -1,36 +1,147 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TempShare
 
-## Getting Started
+**Share Code. Text. Files. Instantly. Securely. Temporarily.**
 
-First, run the development server:
+A production-ready real-time temporary sharing platform — Pastebin + VS Code Live Share + WeTransfer — with no accounts required.
+
+![Stack](https://img.shields.io/badge/Next.js-15-black) ![React](https://img.shields.io/badge/React-19-61dafb) ![TypeScript](https://img.shields.io/badge/TypeScript-5-blue) ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791) ![Socket.IO](https://img.shields.io/badge/Socket.IO-4-010101)
+
+## Features
+
+- **6–8 digit numeric room codes** (no letters/symbols)
+- **Share types**: Code · Text · Files · Mixed
+- **Monaco** collaborative code editor (13 languages, cursors, themes)
+- **Markdown** text editor with live preview
+- **Drag & drop** multi-file uploads with progress & previews
+- **Live presence** with anonymous names, colors, typing indicators
+- **Auto-expiration** with BullMQ cleanup (DB, files, Redis, sockets)
+- **Dark / light / system** themes
+- **QR code** + share links (join still requires the room code)
+- **No authentication** — temporary room tokens for WebSocket auth
+
+## Quick start (Docker)
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.example .env
+docker compose up -d --build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+| Service   | URL                        |
+|-----------|----------------------------|
+| App       | http://localhost:3000      |
+| WebSocket | http://localhost:3001      |
+| Nginx     | http://localhost           |
+| MinIO UI  | http://localhost:9001      |
+| Postgres  | localhost:5433 (host) → 5432 (container) |
+| Redis     | localhost:6379             |
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Local development
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Prerequisites
 
-## Learn More
+- Node.js 22+
+- Docker (for Postgres, Redis, MinIO)
 
-To learn more about Next.js, take a look at the following resources:
+### Setup
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+# Start infrastructure only
+docker compose up -d postgres redis minio minio-init
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+# Install & migrate
+cp .env.example .env
+npm install
+npx prisma generate
+npx prisma db push
+npx tsx prisma/seed.ts   # optional demo room 100000
 
-## Deploy on Vercel
+# Run web + websocket (two terminals or concurrent)
+npm run dev:all
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+| Script            | Description                          |
+|-------------------|--------------------------------------|
+| `npm run dev`     | Next.js (port 3000)                  |
+| `npm run dev:ws`  | Socket.IO + cleanup worker (3001)    |
+| `npm run dev:all` | Both via concurrently                |
+| `npm run build`   | Production Next.js build             |
+| `npm run start`   | Start production Next.js             |
+| `npm test`        | Unit tests (node:test)               |
+| `npm run lint`    | ESLint                               |
+| `npm run db:push` | Prisma schema push                   |
+| `npm run db:seed` | Seed demo room                       |
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│  Next.js    │────▶│  PostgreSQL  │     │   MinIO/S3  │
+│  App + API  │     │   (Prisma)   │     │   files     │
+└──────┬──────┘     └──────▲───────┘     └──────▲──────┘
+       │                   │                    │
+       │ WS (Socket.IO)    │                    │
+       ▼                   │                    │
+┌─────────────┐     ┌──────┴───────┐            │
+│  WS Server  │────▶│    Redis     │────────────┘
+│  + BullMQ   │     │ cache/pubsub │
+└─────────────┘     └──────────────┘
+```
+
+### Folder structure
+
+```
+├── src/
+│   ├── app/                 # App Router pages + API routes
+│   ├── components/          # UI + room features
+│   ├── hooks/               # useSocket, etc.
+│   ├── lib/                 # prisma, redis, storage, services
+│   └── stores/              # Zustand room store
+├── server/                  # Socket.IO server + cleanup worker
+├── prisma/                  # Schema, seed
+├── docker/                  # Nginx, Postgres init, entrypoints
+└── .github/workflows/       # CI
+```
+
+## WebSocket events
+
+| Event              | Direction | Purpose                |
+|--------------------|-----------|------------------------|
+| `room:join`        | C→S       | Join with code + token |
+| `room:leave`       | C→S       | Leave room             |
+| `room:joined`      | S→C       | Full room snapshot     |
+| `room:expired`     | S→C       | Room destroyed         |
+| `code:update`      | bi        | Editor content sync    |
+| `code:cursor`      | bi        | Remote cursors         |
+| `code:language`    | bi        | Language change        |
+| `text:update`      | bi        | Markdown sync          |
+| `file:upload`      | bi        | New file notification  |
+| `file:delete`      | bi        | File removed           |
+| `presence:update`  | S→C       | Online users           |
+| `timer:update`     | S→C       | Expiration countdown   |
+| `typing:update`    | bi        | Typing indicators      |
+
+## Security
+
+- Numeric room codes only; internal UUIDs
+- Temporary room tokens for WS & file APIs
+- Zod validation on all inputs
+- File type + size limits
+- CSP, security headers, rate-limit hooks
+- Virus-scan hook point on upload (pluggable no-op)
+- Cascade delete + storage cleanup on expiry
+
+## Environment
+
+See [`.env.example`](./.env.example) for the full list.
+
+Critical variables:
+
+- `DATABASE_URL` — PostgreSQL
+- `REDIS_URL` — Redis
+- `S3_*` — MinIO / AWS S3 / Cloudflare R2
+- `ROOM_TOKEN_SECRET` — change in production
+- `NEXT_PUBLIC_WS_URL` — browser WebSocket URL
+
+## License
+
+MIT
