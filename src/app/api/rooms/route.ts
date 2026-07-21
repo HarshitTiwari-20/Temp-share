@@ -5,14 +5,23 @@ import { logger } from "@/lib/logger";
 import { rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
+// Prefer keeping the function warm on platforms that support it
+export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
+  const started = Date.now();
   try {
     const ip =
       req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
       req.headers.get("x-real-ip") ||
       "unknown";
-    const rl = await rateLimit({ key: `create:${ip}`, limit: 20, windowMs: 60_000 });
+
+    // In-memory — microseconds (was a Postgres transaction before)
+    const rl = await rateLimit({
+      key: `create:${ip}`,
+      limit: 20,
+      windowMs: 60_000,
+    });
     if (!rl.success) {
       return NextResponse.json(
         { error: "Too many rooms created. Try again shortly." },
@@ -49,6 +58,7 @@ export async function POST(req: NextRequest) {
     logger.info("Room created", {
       roomCode: room.roomCode,
       type: room.type,
+      ms: Date.now() - started,
       expiresAt: room.expiresAt.toISOString(),
     });
 
@@ -69,6 +79,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     logger.error("Failed to create room", {
       error: err instanceof Error ? err.message : String(err),
+      ms: Date.now() - started,
     });
     return NextResponse.json(
       { error: "Failed to create room" },

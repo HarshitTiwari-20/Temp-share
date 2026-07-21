@@ -1,81 +1,101 @@
 import { randomBytes } from "crypto";
+import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { generateRoomCode } from "./utils";
 import { deleteObjects } from "./storage";
 import type { RoomType } from "@prisma/client";
 
 const ROOM_CODE_LENGTH = 6;
-const MAX_CODE_ATTEMPTS = 20;
+const MAX_CREATE_ATTEMPTS = 8;
 
 export function generateRoomToken(): string {
   return randomBytes(32).toString("hex");
 }
 
-export async function generateUniqueRoomCode(): Promise<string> {
-  for (let i = 0; i < MAX_CODE_ATTEMPTS; i++) {
-    const code = generateRoomCode(ROOM_CODE_LENGTH);
-    const existing = await prisma.room.findUnique({
-      where: { roomCode: code },
-      select: { id: true },
-    });
-    if (!existing) return code;
-  }
-  // Fallback to 8 digits if collisions
-  for (let i = 0; i < MAX_CODE_ATTEMPTS; i++) {
-    const code = generateRoomCode(8);
-    const existing = await prisma.room.findUnique({
-      where: { roomCode: code },
-      select: { id: true },
-    });
-    if (!existing) return code;
-  }
-  throw new Error("Failed to generate unique room code");
-}
-
+/**
+ * Create room in a single INSERT (retry only on rare roomCode collision).
+ * Avoids the old generateUniqueRoomCode SELECT-before-INSERT round-trip.
+ */
 export async function createRoom(input: {
   type: RoomType;
   expirationMinutes: number;
   language?: string;
 }) {
-  const roomCode = await generateUniqueRoomCode();
   const token = generateRoomToken();
   const expiresAt = new Date(Date.now() + input.expirationMinutes * 60 * 1000);
+  const wantsCode = input.type === "CODE" || input.type === "MIXED";
+  const wantsText = input.type === "TEXT" || input.type === "MIXED";
 
-  const room = await prisma.room.create({
-    data: {
-      roomCode,
-      type: input.type,
-      token,
-      expiresAt,
-      ...(input.type === "CODE" || input.type === "MIXED"
-        ? {
-            code: {
-              create: {
-                language: input.language || "javascript",
-                content: "",
-              },
-            },
-          }
-        : {}),
-      ...(input.type === "TEXT" || input.type === "MIXED"
-        ? {
-            text: {
-              create: {
-                markdown: "",
-              },
-            },
-          }
-        : {}),
-    },
-    include: {
-      code: true,
-      text: true,
-      files: true,
-      activeUsers: true,
-    },
-  });
+  let lastError: unknown;
 
-  return room;
+  for (let attempt = 0; attempt < MAX_CREATE_ATTEMPTS; attempt++) {
+    const roomCode = generateRoomCode(
+      attempt < MAX_CREATE_ATTEMPTS - 2 ? ROOM_CODE_LENGTH : 8
+    );
+
+    try {
+      // Minimal create — no empty includes (files/activeUsers) to save query time
+      const room = await prisma.room.create({
+        data: {
+          roomCode,
+          type: input.type,
+          token,
+          expiresAt,
+          ...(wantsCode
+            ? {
+                code: {
+                  create: {
+                    language: input.language || "javascript",
+                    content: "",
+                  },
+                },
+              }
+            : {}),
+          ...(wantsText
+            ? {
+                text: {
+                  create: {
+                    markdown: "",
+                  },
+                },
+              }
+            : {}),
+        },
+        select: {
+          id: true,
+          roomCode: true,
+          type: true,
+          token: true,
+          expiresAt: true,
+          createdAt: true,
+          updatedAt: true,
+          code: { select: { language: true, content: true } },
+          text: { select: { markdown: true } },
+        },
+      });
+
+      // Shape matches serializeRoom expectations
+      return {
+        ...room,
+        files: [] as never[],
+        activeUsers: [] as never[],
+      };
+    } catch (err) {
+      lastError = err;
+      // Unique constraint on roomCode — try another code
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to generate unique room code");
 }
 
 export async function getRoomByCode(roomCode: string) {
@@ -146,7 +166,6 @@ export async function destroyRoom(roomId: string): Promise<void> {
 
   if (!room) return;
 
-  // Delete files from object storage
   const keys = room.files.map((f) => f.storageKey);
   try {
     await deleteObjects(keys);
@@ -154,7 +173,6 @@ export async function destroyRoom(roomId: string): Promise<void> {
     console.error("[room-service] storage cleanup error:", err);
   }
 
-  // Cascade deletes related rows in Postgres
   await prisma.room.delete({ where: { id: roomId } }).catch(() => {
     // already deleted
   });
@@ -174,7 +192,32 @@ export async function destroyExpiredRooms(): Promise<number> {
 }
 
 export function serializeRoom(
-  room: NonNullable<Awaited<ReturnType<typeof getRoomByCode>>>
+  room: NonNullable<Awaited<ReturnType<typeof getRoomByCode>>> | {
+    id: string;
+    roomCode: string;
+    type: RoomType;
+    token: string;
+    expiresAt: Date;
+    createdAt: Date;
+    updatedAt: Date;
+    code: { language: string; content: string } | null;
+    text: { markdown: string } | null;
+    files: {
+      id: string;
+      fileName: string;
+      fileSize: number;
+      mimeType: string;
+      storageUrl: string;
+      uploadedAt: Date;
+    }[];
+    activeUsers: {
+      id: string;
+      socketId: string;
+      anonymousName: string;
+      cursorColor: string;
+      connectedAt: Date;
+    }[];
+  }
 ) {
   return {
     id: room.id,
@@ -187,7 +230,7 @@ export function serializeRoom(
       ? { language: room.code.language, content: room.code.content }
       : null,
     text: room.text ? { markdown: room.text.markdown } : null,
-    files: room.files.map((f) => ({
+    files: (room.files ?? []).map((f) => ({
       id: f.id,
       fileName: f.fileName,
       fileSize: f.fileSize,
@@ -195,7 +238,7 @@ export function serializeRoom(
       storageUrl: f.storageUrl,
       uploadedAt: f.uploadedAt.toISOString(),
     })),
-    activeUsers: room.activeUsers.map((u) => ({
+    activeUsers: (room.activeUsers ?? []).map((u) => ({
       id: u.id,
       socketId: u.socketId,
       anonymousName: u.anonymousName,

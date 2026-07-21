@@ -87,17 +87,6 @@ export function startCleanupWorker(io: AppServer) {
     }
   }, 5000);
 
-  // Also purge old rate-limit rows periodically
-  const rateLimitTimer = setInterval(async () => {
-    try {
-      await prisma.rateLimitBucket.deleteMany({
-        where: { resetAt: { lte: new Date() } },
-      });
-    } catch {
-      // ignore
-    }
-  }, CLEANUP_INTERVAL_MS * 5);
-
   logger.info("Postgres cleanup worker scheduled", {
     intervalMs: CLEANUP_INTERVAL_MS,
   });
@@ -106,7 +95,6 @@ export function startCleanupWorker(io: AppServer) {
     stop() {
       clearInterval(cleanupTimer);
       clearInterval(nearExpiryTimer);
-      clearInterval(rateLimitTimer);
     },
   };
 }
