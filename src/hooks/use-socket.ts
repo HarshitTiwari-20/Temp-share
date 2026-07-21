@@ -11,22 +11,47 @@ import type {
 
 type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
+/**
+ * Resolve WebSocket base URL.
+ * - "same" / "auto" / empty → browser origin (combined Docker / single deploy)
+ * - otherwise use NEXT_PUBLIC_WS_URL (local split: http://localhost:3001)
+ */
 function resolveWsUrl(): string {
-  const raw = (process.env.NEXT_PUBLIC_WS_URL || "http://localhost:3001").trim();
-  // Guard against common misconfig (empty / relative without host)
-  if (!raw || raw === "undefined") return "http://localhost:3001";
+  const raw = (process.env.NEXT_PUBLIC_WS_URL || "").trim();
+
+  if (typeof window !== "undefined") {
+    if (!raw || raw === "same" || raw === "auto" || raw === "undefined") {
+      return window.location.origin;
+    }
+    return raw.replace(/\/$/, "");
+  }
+
+  // SSR / server-side fallback
+  if (!raw || raw === "same" || raw === "auto" || raw === "undefined") {
+    return (
+      process.env.NEXT_PUBLIC_APP_URL ||
+      process.env.RENDER_EXTERNAL_URL ||
+      "http://localhost:3000"
+    ).replace(/\/$/, "");
+  }
   return raw.replace(/\/$/, "");
 }
 
-const WS_URL = resolveWsUrl();
-
 let sharedSocket: AppSocket | null = null;
+let sharedSocketUrl: string | null = null;
 
 export function getSocket(): AppSocket {
+  const url = resolveWsUrl();
+  // Recreate if URL changed (e.g. hydration / env)
+  if (sharedSocket && sharedSocketUrl !== url) {
+    sharedSocket.disconnect();
+    sharedSocket = null;
+  }
   if (!sharedSocket) {
-    sharedSocket = io(WS_URL, {
+    sharedSocketUrl = url;
+    sharedSocket = io(url, {
       autoConnect: false,
-      // Polling first — more reliable on Render free tier / proxies
+      // Polling first — more reliable on free-tier proxies
       transports: ["polling", "websocket"],
       upgrade: true,
       path: "/socket.io/",
@@ -42,7 +67,7 @@ export function getSocket(): AppSocket {
 }
 
 export function getWsUrl(): string {
-  return WS_URL;
+  return resolveWsUrl();
 }
 
 export function useSocket(roomCode: string | null, token: string | null) {
@@ -76,7 +101,7 @@ export function useSocket(roomCode: string | null, token: string | null) {
     const onConnectError = (err: Error) => {
       store.getState().setConnected(false);
       store.getState().setReconnecting(true);
-      console.warn("[socket] connect_error", WS_URL, err.message);
+      console.warn("[socket] connect_error", resolveWsUrl(), err.message);
     };
 
     const onReconnectAttempt = () => {

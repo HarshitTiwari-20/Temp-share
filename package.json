@@ -9,6 +9,8 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "start:ws": "tsx server/index.ts",
+    "start:combined": "tsx server/combined.ts",
+    "start:docker": "tsx server/combined.ts",
     "lint": "eslint .",
     "test": "tsx --test src/lib/__tests__/**/*.test.ts",
     "db:generate": "prisma generate",

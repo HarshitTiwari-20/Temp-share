@@ -19,26 +19,40 @@ A production-ready real-time temporary sharing platform — Pastebin + VS Code L
 - **QR code** + share links (join still requires the room code)
 - **No authentication** — temporary room tokens for WebSocket auth
 
-## Deploy on Render
+## Deploy on Render (one service — recommended)
 
-Blueprint file: [`render.yaml`](./render.yaml)
+**One Docker container** runs Next.js + Socket.IO together. No separate web/ws.
 
-1. [Render Dashboard](https://dashboard.render.com) → **New** → **Blueprint**
-2. Connect the GitHub repo `Temp-share`
-3. Create the stack (`tempshare-web` + `tempshare-ws`)
-4. Set env vars marked `sync: false` on **both** services:
+Blueprint: [`render.yaml`](./render.yaml) · Image: [`Dockerfile`](./Dockerfile)
 
-| Variable | Example |
-|----------|---------|
-| `DATABASE_URL` | Your Postgres connection string |
-| `NEXT_PUBLIC_APP_URL` | `https://tempshare-web.onrender.com` |
-| `NEXT_PUBLIC_WS_URL` | `https://tempshare-ws.onrender.com` |
-| `ROOM_TOKEN_SECRET` | Same long secret on web + ws |
-| `S3_*` | Your MinIO / S3 / R2 credentials |
+1. [Render Dashboard](https://dashboard.render.com) → **New** → **Web Service**
+2. Connect repo → **Docker** (not Node)
+3. Or **New → Blueprint** to use `render.yaml`
+4. Set env vars:
 
-5. Redeploy after setting public URLs so the client picks up `NEXT_PUBLIC_*`.
+| Variable | Value |
+|----------|--------|
+| `DATABASE_URL` | Your Postgres URL |
+| `NEXT_PUBLIC_APP_URL` | `https://your-service.onrender.com` |
+| `NEXT_PUBLIC_WS_URL` | `same` (uses the same origin for Socket.IO) |
+| `ROOM_TOKEN_SECRET` | Long random secret |
+| `S3_*` | Optional, for file uploads |
 
-Free tier services sleep when idle — use a paid plan for always-on WebSockets.
+5. Deploy once. Health check: `/api/health`
+
+### Local Docker (same as production)
+
+```bash
+docker build -t tempshare .
+docker run --rm -p 3000:3000 --env-file .env \
+  -e NEXT_PUBLIC_WS_URL=same \
+  -e NEXT_PUBLIC_APP_URL=http://localhost:3000 \
+  tempshare
+```
+
+Open http://localhost:3000 — UI and realtime on the same port.
+
+Free tier may sleep when idle; first request can take 30–60s.
 
 ## Quick start (Docker)
 
