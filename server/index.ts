@@ -18,13 +18,44 @@ import type {
 const WS_PORT = Number(process.env.PORT || process.env.WS_PORT || 3001);
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
 
+/** Build allowed CORS origins (web URL + localhost + optional extras) */
+function allowedOrigins(): (string | RegExp)[] {
+  const list: (string | RegExp)[] = [
+    APP_URL,
+    APP_URL.replace(/\/$/, ""),
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+  ];
+  const extra = process.env.CORS_ORIGINS;
+  if (extra) {
+    for (const o of extra.split(",").map((s) => s.trim()).filter(Boolean)) {
+      list.push(o);
+    }
+  }
+  // Any *.onrender.com frontend (preview / renamed services)
+  list.push(/^https:\/\/[\w-]+\.onrender\.com$/);
+  return list;
+}
+
+function isOriginAllowed(origin: string | undefined): boolean {
+  if (!origin) return true; // non-browser / same-origin tooling
+  const allowed = allowedOrigins();
+  return allowed.some((a) =>
+    typeof a === "string" ? a === origin : a.test(origin)
+  );
+}
+
 async function main() {
   const app = express();
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(compression());
   app.use(
     cors({
-      origin: [APP_URL, "http://localhost:3000"],
+      origin(origin, cb) {
+        if (isOriginAllowed(origin)) return cb(null, true);
+        logger.warn("CORS blocked origin", { origin });
+        return cb(null, false);
+      },
       credentials: true,
     })
   );
@@ -39,17 +70,23 @@ async function main() {
 
   const httpServer = http.createServer(app);
 
-  // Single-node Socket.IO (no Redis adapter — Postgres holds durable state)
   const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
     cors: {
-      origin: [APP_URL, "http://localhost:3000"],
+      origin(origin, cb) {
+        if (isOriginAllowed(origin)) return cb(null, true);
+        return cb(new Error(`CORS blocked: ${origin}`), false);
+      },
       methods: ["GET", "POST"],
       credentials: true,
     },
-    transports: ["websocket", "polling"],
-    pingInterval: 10000,
+    // Polling first is more reliable on free-tier proxies; upgrade to websocket
+    transports: ["polling", "websocket"],
+    allowUpgrades: true,
+    pingInterval: 25000,
     pingTimeout: 20000,
     maxHttpBufferSize: 1e6,
+    // Helpful behind Render reverse proxy
+    path: "/socket.io/",
   });
 
   try {
@@ -63,8 +100,10 @@ async function main() {
   setupSocketHandlers(io);
   const cleanup = startCleanupWorker(io);
 
-  httpServer.listen(WS_PORT, () => {
-    logger.info(`WebSocket server listening on :${WS_PORT}`);
+  httpServer.listen(WS_PORT, "0.0.0.0", () => {
+    logger.info(`WebSocket server listening on 0.0.0.0:${WS_PORT}`, {
+      appUrl: APP_URL,
+    });
   });
 
   const shutdown = () => {

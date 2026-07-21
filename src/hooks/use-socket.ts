@@ -11,7 +11,14 @@ import type {
 
 type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "http://localhost:3001";
+function resolveWsUrl(): string {
+  const raw = (process.env.NEXT_PUBLIC_WS_URL || "http://localhost:3001").trim();
+  // Guard against common misconfig (empty / relative without host)
+  if (!raw || raw === "undefined") return "http://localhost:3001";
+  return raw.replace(/\/$/, "");
+}
+
+const WS_URL = resolveWsUrl();
 
 let sharedSocket: AppSocket | null = null;
 
@@ -19,56 +26,77 @@ export function getSocket(): AppSocket {
   if (!sharedSocket) {
     sharedSocket = io(WS_URL, {
       autoConnect: false,
-      transports: ["websocket", "polling"],
+      // Polling first — more reliable on Render free tier / proxies
+      transports: ["polling", "websocket"],
+      upgrade: true,
+      path: "/socket.io/",
       reconnection: true,
       reconnectionAttempts: Infinity,
-      reconnectionDelay: 500,
-      reconnectionDelayMax: 5000,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 8000,
+      timeout: 20000,
+      withCredentials: true,
     });
   }
   return sharedSocket;
 }
 
+export function getWsUrl(): string {
+  return WS_URL;
+}
+
 export function useSocket(roomCode: string | null, token: string | null) {
   const socketRef = useRef<AppSocket | null>(null);
   const store = useRoomStore;
+  // Avoid leaving room on React Strict Mode remount flicker
+  const intentionalLeave = useRef(false);
 
   const connect = useCallback(() => {
     if (!roomCode || !token) return;
     const socket = getSocket();
     socketRef.current = socket;
+    intentionalLeave.current = false;
 
-    if (!socket.connected) {
-      socket.connect();
-    }
-
-    const onConnect = () => {
+    const join = () => {
       store.getState().setConnected(true);
       store.getState().setReconnecting(false);
       socket.emit("room:join", { roomCode, token });
     };
 
-    const onDisconnect = () => {
+    const onConnect = () => join();
+
+    const onDisconnect = (reason: string) => {
       store.getState().setConnected(false);
+      if (reason === "io server disconnect") {
+        // Server forced disconnect — try reconnect
+        socket.connect();
+      }
+    };
+
+    const onConnectError = (err: Error) => {
+      store.getState().setConnected(false);
+      store.getState().setReconnecting(true);
+      console.warn("[socket] connect_error", WS_URL, err.message);
     };
 
     const onReconnectAttempt = () => {
       store.getState().setReconnecting(true);
     };
 
+    const onReconnect = () => {
+      store.getState().setReconnecting(false);
+      join();
+    };
+
     const onJoined: ServerToClientEvents["room:joined"] = ({ room, self }) => {
       const prev = store.getState();
-      // First join (or different room): load full snapshot.
-      // Re-join of same room: keep local code/text so we don't wipe in-progress typing
-      // (server may still have empty content if debounced save hasn't flushed).
       if (!prev.room || prev.room.id !== room.id) {
         store.getState().setRoom(room, token);
       } else {
-        // Soft refresh: metadata, files, users — not editor buffers
+        // Soft refresh — keep local buffers
         store.setState({
           room: {
             ...room,
-            // preserve local-facing content on the room object
             code: prev.room.code
               ? {
                   language: prev.language || room.code?.language || "javascript",
@@ -80,16 +108,17 @@ export function useSocket(roomCode: string | null, token: string | null) {
               : room.text,
           },
           token,
-          files: room.files,
+          files: room.files?.length ? room.files : prev.files,
           remainingMs: Math.max(
             0,
             new Date(room.expiresAt).getTime() - Date.now()
           ),
         });
-        store.getState().setUsers(room.activeUsers);
       }
       store.getState().setSelf(self);
       store.getState().setUsers(room.activeUsers);
+      store.getState().setConnected(true);
+      store.getState().setReconnecting(false);
     };
 
     const onError: ServerToClientEvents["room:error"] = ({ message }) => {
@@ -170,7 +199,9 @@ export function useSocket(roomCode: string | null, token: string | null) {
 
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
+    socket.on("connect_error", onConnectError);
     socket.io.on("reconnect_attempt", onReconnectAttempt);
+    socket.io.on("reconnect", onReconnect);
     socket.on("room:joined", onJoined);
     socket.on("room:error", onError);
     socket.on("room:expired", onExpired);
@@ -186,14 +217,18 @@ export function useSocket(roomCode: string | null, token: string | null) {
     socket.on("timer:update", onTimer);
     socket.on("typing:update", onTyping);
 
-    if (socket.connected) {
-      onConnect();
+    if (!socket.connected) {
+      socket.connect();
+    } else {
+      join();
     }
 
     return () => {
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
+      socket.off("connect_error", onConnectError);
       socket.io.off("reconnect_attempt", onReconnectAttempt);
+      socket.io.off("reconnect", onReconnect);
       socket.off("room:joined", onJoined);
       socket.off("room:error", onError);
       socket.off("room:expired", onExpired);
@@ -208,7 +243,14 @@ export function useSocket(roomCode: string | null, token: string | null) {
       socket.off("file:delete", onFileDelete);
       socket.off("timer:update", onTimer);
       socket.off("typing:update", onTyping);
-      socket.emit("room:leave");
+      // Soft leave only when navigating away (delay avoids Strict Mode double-mount leave)
+      intentionalLeave.current = true;
+      const sid = socket.id;
+      setTimeout(() => {
+        if (intentionalLeave.current && socket.id === sid) {
+          if (socket.connected) socket.emit("room:leave");
+        }
+      }, 300);
     };
   }, [roomCode, token, store]);
 
@@ -259,7 +301,9 @@ export function emitTextUpdate(markdown: string) {
   }
 }
 
-export function emitFileUpload(file: Parameters<ClientToServerEvents["file:upload"]>[0]) {
+export function emitFileUpload(
+  file: Parameters<ClientToServerEvents["file:upload"]>[0]
+) {
   const socket = getSocket();
   if (socket.connected) {
     socket.emit("file:upload", file);
