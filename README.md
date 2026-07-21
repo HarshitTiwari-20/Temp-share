@@ -14,7 +14,7 @@ A production-ready real-time temporary sharing platform — Pastebin + VS Code L
 - **Markdown** text editor with live preview
 - **Drag & drop** multi-file uploads with progress & previews
 - **Live presence** with anonymous names, colors, typing indicators
-- **Auto-expiration** with BullMQ cleanup (DB, files, Redis, sockets)
+- **Auto-expiration** with Postgres-backed cleanup (DB, files, sockets)
 - **Dark / light / system** themes
 - **QR code** + share links (join still requires the room code)
 - **No authentication** — temporary room tokens for WebSocket auth
@@ -33,20 +33,19 @@ docker compose up -d --build
 | Nginx     | http://localhost           |
 | MinIO UI  | http://localhost:9001      |
 | Postgres  | localhost:5433 (host) → 5432 (container) |
-| Redis     | localhost:6379             |
 
 ## Local development
 
 ### Prerequisites
 
 - Node.js 22+
-- Docker (for Postgres, Redis, MinIO)
+- Docker (for MinIO; Postgres via `DATABASE_URL`)
 
 ### Setup
 
 ```bash
 # Start infrastructure only
-docker compose up -d postgres redis minio minio-init
+docker compose up -d postgres minio minio-init
 
 # Install & migrate
 cp .env.example .env
@@ -77,15 +76,17 @@ npm run dev:all
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
 │  Next.js    │────▶│  PostgreSQL  │     │   MinIO/S3  │
 │  App + API  │     │   (Prisma)   │     │   files     │
-└──────┬──────┘     └──────▲───────┘     └──────▲──────┘
-       │                   │                    │
-       │ WS (Socket.IO)    │                    │
+└──────┬──────┘     │  rooms, RL,  │     └──────▲──────┘
+       │            │  presence    │            │
+       │ WS         └──────▲───────┘            │
        ▼                   │                    │
-┌─────────────┐     ┌──────┴───────┐            │
-│  WS Server  │────▶│    Redis     │────────────┘
-│  + BullMQ   │     │ cache/pubsub │
-└─────────────┘     └──────────────┘
+┌─────────────┐            │                    │
+│  WS Server  │────────────┴────────────────────┘
+│  + cleanup  │
+└─────────────┘
 ```
+
+No Redis — Postgres is the single durable store (rooms, rate limits, presence, cleanup).
 
 ### Folder structure
 
@@ -94,7 +95,7 @@ npm run dev:all
 │   ├── app/                 # App Router pages + API routes
 │   ├── components/          # UI + room features
 │   ├── hooks/               # useSocket, etc.
-│   ├── lib/                 # prisma, redis, storage, services
+│   ├── lib/                 # prisma, storage, services
 │   └── stores/              # Zustand room store
 ├── server/                  # Socket.IO server + cleanup worker
 ├── prisma/                  # Schema, seed
@@ -136,8 +137,7 @@ See [`.env.example`](./.env.example) for the full list.
 
 Critical variables:
 
-- `DATABASE_URL` — PostgreSQL
-- `REDIS_URL` — Redis
+- `DATABASE_URL` — PostgreSQL (required; also used for rate limits + cleanup)
 - `S3_*` — MinIO / AWS S3 / Cloudflare R2
 - `ROOM_TOKEN_SECRET` — change in production
 - `NEXT_PUBLIC_WS_URL` — browser WebSocket URL

@@ -5,8 +5,6 @@ import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import { Server } from "socket.io";
-import { createAdapter } from "@socket.io/redis-adapter";
-import Redis from "ioredis";
 import { setupSocketHandlers } from "./socket";
 import { startCleanupWorker } from "./worker";
 import { ensureBucket } from "../src/lib/storage";
@@ -18,7 +16,6 @@ import type {
 
 const WS_PORT = Number(process.env.WS_PORT || 3001);
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
 async function main() {
   const app = express();
@@ -32,11 +29,16 @@ async function main() {
   );
 
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", service: "ws", timestamp: new Date().toISOString() });
+    res.json({
+      status: "ok",
+      service: "ws",
+      timestamp: new Date().toISOString(),
+    });
   });
 
   const httpServer = http.createServer(app);
 
+  // Single-node Socket.IO (no Redis adapter — Postgres holds durable state)
   const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
     cors: {
       origin: [APP_URL, "http://localhost:3000"],
@@ -49,28 +51,6 @@ async function main() {
     maxHttpBufferSize: 1e6,
   });
 
-  // Redis adapter for horizontal scaling
-  try {
-    const pubClient = new Redis(REDIS_URL, { maxRetriesPerRequest: null });
-    const subClient = pubClient.duplicate();
-    await Promise.all([
-      new Promise<void>((resolve, reject) => {
-        pubClient.once("ready", () => resolve());
-        pubClient.once("error", reject);
-      }),
-      new Promise<void>((resolve, reject) => {
-        subClient.once("ready", () => resolve());
-        subClient.once("error", reject);
-      }),
-    ]);
-    io.adapter(createAdapter(pubClient, subClient));
-    logger.info("Socket.IO Redis adapter connected");
-  } catch (err) {
-    logger.warn("Redis adapter unavailable, running single-node", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-
   try {
     await ensureBucket();
   } catch (err) {
@@ -80,7 +60,7 @@ async function main() {
   }
 
   setupSocketHandlers(io);
-  startCleanupWorker(io);
+  const cleanup = startCleanupWorker(io);
 
   httpServer.listen(WS_PORT, () => {
     logger.info(`WebSocket server listening on :${WS_PORT}`);
@@ -88,6 +68,7 @@ async function main() {
 
   const shutdown = () => {
     logger.info("Shutting down WS server...");
+    cleanup.stop();
     io.close();
     httpServer.close(() => process.exit(0));
     setTimeout(() => process.exit(1), 10000);

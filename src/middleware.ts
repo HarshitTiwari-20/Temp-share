@@ -33,7 +33,7 @@ export function middleware(request: NextRequest) {
     ].join("; ")
   );
 
-  // API rate-limit headers (actual limiting can be done via Redis in production)
+  // API rate-limit policy hint (enforced in API via Postgres buckets)
   if (request.nextUrl.pathname.startsWith("/api/")) {
     response.headers.set("X-RateLimit-Policy", "100;w=60");
   }

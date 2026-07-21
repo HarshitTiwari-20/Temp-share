@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { ensureRedis } from "@/lib/redis";
 
 export const runtime = "nodejs";
 
@@ -15,15 +14,6 @@ export async function GET() {
     checks.database = "ok";
   } catch {
     checks.database = "error";
-    checks.status = "degraded";
-  }
-
-  try {
-    const redis = await ensureRedis();
-    await redis.ping();
-    checks.redis = "ok";
-  } catch {
-    checks.redis = "error";
     checks.status = "degraded";
   }
 

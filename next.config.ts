@@ -12,8 +12,6 @@ const nextConfig: NextConfig = {
   serverExternalPackages: [
     "@prisma/client",
     "prisma",
-    "ioredis",
-    "bullmq",
     "@aws-sdk/client-s3",
   ],
   images: {

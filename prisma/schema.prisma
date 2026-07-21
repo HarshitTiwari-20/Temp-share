@@ -85,3 +85,14 @@ model ActiveUser {
   @@index([roomId])
   @@map("active_users")
 }
+
+/// Postgres-backed rate limit buckets (replaces Redis INCR/PEXPIRE)
+model RateLimitBucket {
+  key       String   @id @db.VarChar(191)
+  count     Int      @default(0)
+  resetAt   DateTime
+  updatedAt DateTime @updatedAt
+
+  @@index([resetAt])
+  @@map("rate_limit_buckets")
+}

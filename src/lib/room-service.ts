@@ -2,7 +2,6 @@ import { randomBytes } from "crypto";
 import { prisma } from "./prisma";
 import { generateRoomCode } from "./utils";
 import { deleteObjects } from "./storage";
-import { ensureRedis, roomCacheKey, roomTokenKey } from "./redis";
 import type { RoomType } from "@prisma/client";
 
 const ROOM_CODE_LENGTH = 6;
@@ -76,46 +75,10 @@ export async function createRoom(input: {
     },
   });
 
-  try {
-    const redis = await ensureRedis();
-    const ttl = Math.max(
-      1,
-      Math.ceil((expiresAt.getTime() - Date.now()) / 1000)
-    );
-    await redis.setex(
-      roomCacheKey(roomCode),
-      ttl,
-      JSON.stringify({
-        id: room.id,
-        roomCode: room.roomCode,
-        type: room.type,
-        expiresAt: room.expiresAt.toISOString(),
-        token: room.token,
-      })
-    );
-    await redis.setex(roomTokenKey(token), ttl, room.id);
-  } catch (err) {
-    console.warn("[room-service] redis cache failed:", err);
-  }
-
   return room;
 }
 
 export async function getRoomByCode(roomCode: string) {
-  // Try cache first
-  try {
-    const redis = await ensureRedis();
-    const cached = await redis.get(roomCacheKey(roomCode));
-    if (cached) {
-      const meta = JSON.parse(cached) as { expiresAt: string; id: string };
-      if (new Date(meta.expiresAt).getTime() <= Date.now()) {
-        return null;
-      }
-    }
-  } catch {
-    // ignore cache misses
-  }
-
   const room = await prisma.room.findUnique({
     where: { roomCode },
     include: {
@@ -183,7 +146,7 @@ export async function destroyRoom(roomId: string): Promise<void> {
 
   if (!room) return;
 
-  // Delete files from storage
+  // Delete files from object storage
   const keys = room.files.map((f) => f.storageKey);
   try {
     await deleteObjects(keys);
@@ -191,16 +154,7 @@ export async function destroyRoom(roomId: string): Promise<void> {
     console.error("[room-service] storage cleanup error:", err);
   }
 
-  // Clear redis
-  try {
-    const redis = await ensureRedis();
-    await redis.del(roomCacheKey(room.roomCode));
-    await redis.del(roomTokenKey(room.token));
-  } catch (err) {
-    console.warn("[room-service] redis cleanup error:", err);
-  }
-
-  // Cascade deletes related rows
+  // Cascade deletes related rows in Postgres
   await prisma.room.delete({ where: { id: roomId } }).catch(() => {
     // already deleted
   });
@@ -219,7 +173,9 @@ export async function destroyExpiredRooms(): Promise<number> {
   return expired.length;
 }
 
-export function serializeRoom(room: NonNullable<Awaited<ReturnType<typeof getRoomByCode>>>) {
+export function serializeRoom(
+  room: NonNullable<Awaited<ReturnType<typeof getRoomByCode>>>
+) {
   return {
     id: room.id,
     roomCode: room.roomCode,

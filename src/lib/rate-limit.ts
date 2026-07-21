@@ -1,11 +1,9 @@
-import { ensureRedis } from "./redis";
+import { prisma } from "./prisma";
 
 /**
- * Sliding-window rate limiter backed by Redis.
- * Falls back to in-memory Map when Redis is unavailable.
+ * Sliding/fixed-window rate limiter backed by PostgreSQL
+ * (replaces Redis INCR + PEXPIRE).
  */
-const memory = new Map<string, { count: number; resetAt: number }>();
-
 export async function rateLimit(options: {
   key: string;
   limit?: number;
@@ -14,35 +12,54 @@ export async function rateLimit(options: {
   const limit = options.limit ?? Number(process.env.RATE_LIMIT_MAX || 100);
   const windowMs =
     options.windowMs ?? Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
-  const now = Date.now();
-  const redisKey = `rl:${options.key}`;
+  const now = new Date();
+  const key = options.key.slice(0, 191);
 
   try {
-    const redis = await ensureRedis();
-    const count = await redis.incr(redisKey);
-    if (count === 1) {
-      await redis.pexpire(redisKey, windowMs);
+    const result = await prisma.$transaction(async (tx) => {
+      const existing = await tx.rateLimitBucket.findUnique({ where: { key } });
+
+      if (!existing || existing.resetAt.getTime() <= now.getTime()) {
+        const resetAt = new Date(now.getTime() + windowMs);
+        await tx.rateLimitBucket.upsert({
+          where: { key },
+          create: { key, count: 1, resetAt },
+          update: { count: 1, resetAt },
+        });
+        return {
+          success: true,
+          remaining: limit - 1,
+          resetAt: resetAt.getTime(),
+        };
+      }
+
+      const updated = await tx.rateLimitBucket.update({
+        where: { key },
+        data: { count: { increment: 1 } },
+      });
+
+      return {
+        success: updated.count <= limit,
+        remaining: Math.max(0, limit - updated.count),
+        resetAt: existing.resetAt.getTime(),
+      };
+    });
+
+    // Opportunistic cleanup of expired buckets (best-effort)
+    if (Math.random() < 0.02) {
+      void prisma.rateLimitBucket
+        .deleteMany({ where: { resetAt: { lte: now } } })
+        .catch(() => undefined);
     }
-    const ttl = await redis.pttl(redisKey);
-    const resetAt = now + (ttl > 0 ? ttl : windowMs);
+
+    return result;
+  } catch (err) {
+    // Fail open so a DB blip does not block the product
+    console.warn("[rate-limit] postgres failed, allowing request:", err);
     return {
-      success: count <= limit,
-      remaining: Math.max(0, limit - count),
-      resetAt,
-    };
-  } catch {
-    // In-memory fallback
-    const entry = memory.get(options.key);
-    if (!entry || entry.resetAt <= now) {
-      const resetAt = now + windowMs;
-      memory.set(options.key, { count: 1, resetAt });
-      return { success: true, remaining: limit - 1, resetAt };
-    }
-    entry.count += 1;
-    return {
-      success: entry.count <= limit,
-      remaining: Math.max(0, limit - entry.count),
-      resetAt: entry.resetAt,
+      success: true,
+      remaining: limit,
+      resetAt: Date.now() + windowMs,
     };
   }
 }

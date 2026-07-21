@@ -8,7 +8,6 @@ on:
 
 env:
   DATABASE_URL: postgresql://tempshare:tempshare@localhost:5432/tempshare?schema=public
-  REDIS_URL: redis://localhost:6379
   ROOM_TOKEN_SECRET: ci-test-secret-not-for-production
   NEXT_PUBLIC_APP_URL: http://localhost:3000
   NEXT_PUBLIC_WS_URL: http://localhost:3001
@@ -51,15 +50,6 @@ jobs:
           --health-cmd "pg_isready -U tempshare"
           --health-interval 5s
           --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
           --health-retries 10
 
     steps:

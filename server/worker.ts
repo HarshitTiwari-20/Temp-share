@@ -1,5 +1,3 @@
-import { Queue, Worker } from "bullmq";
-import Redis from "ioredis";
 import type { Server } from "socket.io";
 import { prisma } from "../src/lib/prisma";
 import { destroyRoom } from "../src/lib/room-service";
@@ -10,27 +8,27 @@ import type {
   ServerToClientEvents,
 } from "../src/lib/types";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const CLEANUP_INTERVAL_MS = Number(process.env.CLEANUP_INTERVAL_MS || 60000);
 
 type AppServer = Server<ClientToServerEvents, ServerToClientEvents>;
 
+/**
+ * Postgres-only cleanup (replaces BullMQ + Redis).
+ * Polls for expired rooms and destroys them on a timer.
+ */
 export function startCleanupWorker(io: AppServer) {
-  const connection = new Redis(REDIS_URL, { maxRetriesPerRequest: null });
+  let running = false;
 
-  const queue = new Queue("room-cleanup", { connection });
-
-  const worker = new Worker(
-    "room-cleanup",
-    async () => {
+  async function cleanupExpired() {
+    if (running) return;
+    running = true;
+    try {
       const expired = await prisma.room.findMany({
         where: { expiresAt: { lte: new Date() } },
         select: { id: true, roomCode: true },
       });
 
-      if (expired.length === 0) {
-        return { deleted: 0 };
-      }
+      if (expired.length === 0) return;
 
       for (const room of expired) {
         try {
@@ -45,48 +43,23 @@ export function startCleanupWorker(io: AppServer) {
         }
       }
 
-      return { deleted: expired.length };
-    },
-    { connection: connection.duplicate(), concurrency: 1 }
-  );
-
-  worker.on("completed", (job, result) => {
-    if (result && (result as { deleted: number }).deleted > 0) {
-      logger.info("Cleanup job completed", result);
-    }
-  });
-
-  worker.on("failed", (job, err) => {
-    logger.error("Cleanup job failed", {
-      jobId: job?.id,
-      error: err.message,
-    });
-  });
-
-  // Schedule repeating job every minute
-  queue
-    .add(
-      "cleanup-expired",
-      {},
-      {
-        repeat: { every: CLEANUP_INTERVAL_MS },
-        removeOnComplete: 10,
-        removeOnFail: 20,
-      }
-    )
-    .then(() => {
-      logger.info("Cleanup worker scheduled", {
-        intervalMs: CLEANUP_INTERVAL_MS,
-      });
-    })
-    .catch((err) => {
-      logger.error("Failed to schedule cleanup", {
+      logger.info("Cleanup job completed", { deleted: expired.length });
+    } catch (err) {
+      logger.error("Cleanup job failed", {
         error: err instanceof Error ? err.message : String(err),
       });
-    });
+    } finally {
+      running = false;
+    }
+  }
 
-  // Also run an immediate lightweight timer for sub-minute precision on timer UI
-  setInterval(async () => {
+  // Main cleanup every minute (or CLEANUP_INTERVAL_MS)
+  const cleanupTimer = setInterval(cleanupExpired, CLEANUP_INTERVAL_MS);
+  // Run once on boot
+  void cleanupExpired();
+
+  // Near-expiry timer ticks for connected rooms
+  const nearExpiryTimer = setInterval(async () => {
     try {
       const soon = await prisma.room.findMany({
         where: {
@@ -114,5 +87,26 @@ export function startCleanupWorker(io: AppServer) {
     }
   }, 5000);
 
-  return { queue, worker };
+  // Also purge old rate-limit rows periodically
+  const rateLimitTimer = setInterval(async () => {
+    try {
+      await prisma.rateLimitBucket.deleteMany({
+        where: { resetAt: { lte: new Date() } },
+      });
+    } catch {
+      // ignore
+    }
+  }, CLEANUP_INTERVAL_MS * 5);
+
+  logger.info("Postgres cleanup worker scheduled", {
+    intervalMs: CLEANUP_INTERVAL_MS,
+  });
+
+  return {
+    stop() {
+      clearInterval(cleanupTimer);
+      clearInterval(nearExpiryTimer);
+      clearInterval(rateLimitTimer);
+    },
+  };
 }
