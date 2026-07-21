@@ -1,0 +1,94 @@
+# Render Blueprint — TempShare
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Deploy: Dashboard → New → Blueprint → connect this repo
+# After first deploy, set the sync:false env vars (DATABASE_URL, secrets, S3, public URLs).
+
+previewsEnabled: false
+
+services:
+  # ── Next.js web app (UI + REST API) ─────────────────────────────
+  - type: web
+    name: tempshare-web
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    autoDeploy: true
+    buildCommand: npm ci && npx prisma generate && npx prisma db push && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: ROOM_TOKEN_SECRET
+        generateValue: true
+      - key: NEXT_PUBLIC_APP_URL
+        sync: false
+      - key: NEXT_PUBLIC_WS_URL
+        sync: false
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        value: us-east-1
+      - key: S3_ACCESS_KEY
+        sync: false
+      - key: S3_SECRET_KEY
+        sync: false
+      - key: S3_BUCKET
+        value: tempshare
+      - key: S3_PUBLIC_URL
+        sync: false
+      - key: S3_FORCE_PATH_STYLE
+        value: "true"
+      - key: MAX_FILE_SIZE_MB
+        value: "100"
+      - key: MAX_FILES_PER_ROOM
+        value: "50"
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "60000"
+      - key: RATE_LIMIT_MAX
+        value: "100"
+
+  # ── Socket.IO + cleanup worker ──────────────────────────────────
+  - type: web
+    name: tempshare-ws
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    autoDeploy: true
+    buildCommand: npm ci && npx prisma generate
+    startCommand: npm run start:ws
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: ROOM_TOKEN_SECRET
+        sync: false
+      - key: NEXT_PUBLIC_APP_URL
+        sync: false
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        value: us-east-1
+      - key: S3_ACCESS_KEY
+        sync: false
+      - key: S3_SECRET_KEY
+        sync: false
+      - key: S3_BUCKET
+        value: tempshare
+      - key: S3_PUBLIC_URL
+        sync: false
+      - key: S3_FORCE_PATH_STYLE
+        value: "true"
+      - key: CLEANUP_INTERVAL_MS
+        value: "60000"
+      - key: MAX_FILE_SIZE_MB
+        value: "100"
+      - key: MAX_FILES_PER_ROOM
+        value: "50"

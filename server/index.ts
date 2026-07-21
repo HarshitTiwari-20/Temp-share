@@ -14,7 +14,8 @@ import type {
   ServerToClientEvents,
 } from "../src/lib/types";
 
-const WS_PORT = Number(process.env.WS_PORT || 3001);
+// Render injects PORT; fall back to WS_PORT / 3001 for local dev
+const WS_PORT = Number(process.env.PORT || process.env.WS_PORT || 3001);
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
 
 async function main() {

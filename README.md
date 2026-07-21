@@ -19,6 +19,27 @@ A production-ready real-time temporary sharing platform — Pastebin + VS Code L
 - **QR code** + share links (join still requires the room code)
 - **No authentication** — temporary room tokens for WebSocket auth
 
+## Deploy on Render
+
+Blueprint file: [`render.yaml`](./render.yaml)
+
+1. [Render Dashboard](https://dashboard.render.com) → **New** → **Blueprint**
+2. Connect the GitHub repo `Temp-share`
+3. Create the stack (`tempshare-web` + `tempshare-ws`)
+4. Set env vars marked `sync: false` on **both** services:
+
+| Variable | Example |
+|----------|---------|
+| `DATABASE_URL` | Your Postgres connection string |
+| `NEXT_PUBLIC_APP_URL` | `https://tempshare-web.onrender.com` |
+| `NEXT_PUBLIC_WS_URL` | `https://tempshare-ws.onrender.com` |
+| `ROOM_TOKEN_SECRET` | Same long secret on web + ws |
+| `S3_*` | Your MinIO / S3 / R2 credentials |
+
+5. Redeploy after setting public URLs so the client picks up `NEXT_PUBLIC_*`.
+
+Free tier services sleep when idle — use a paid plan for always-on WebSockets.
+
 ## Quick start (Docker)
 
 ```bash
